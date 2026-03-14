@@ -12,9 +12,17 @@ typedef struct {
 
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct {
+        char username[32];
+        char password[32];
+} LoginMsg;
+
 #define MSG_TYPE_DATA 1
 #define MSG_TYPE_PING 2
 #define MSG_TYPE_PONG 3
+#define MSG_TYPE_LOGIN 4
+#define MSG_TYPE_LOGIN_OK 5
+#define MSG_TYPE_LOGIN_FAIL 6
 
 int recv_all (int fd, char *buf, int len){
         int total = 0;
@@ -33,7 +41,7 @@ int send_msg(int fd, char *buf, int len, int type) {
 	header.len = htonl(len);
 	header.type = htonl(type);
 	int ret = send(fd, &header,sizeof(MsgHeader), 0);
-        if (ret <= 0 || (type != 1 && type != 2 && type != 3)) {
+        if (ret <= 0 || type < 1 || type > 6) {
         return -1;
         }
         int sent = send(fd, buf ,len ,0);
@@ -49,8 +57,7 @@ int recv_msg(int fd, char *buf,int *len, int *type) {
 	int ret = recv_all(fd, (char*)&header, sizeof(MsgHeader));
 	int n = ntohl(header.len);
 	int t = ntohl(header.type);
-	if (ret < 0 ||(t != 1 && t != 2 && t !=3)) return -1;
-	
+	if (ret < 0 || t < 1 || t > 6) return -1;
         int ret1 = recv_all(fd,buf, n);
         if (ret1 < 0) {
         return -1;
@@ -84,6 +91,15 @@ int main()
 	inet_pton(AF_INET,"127.0.0.1", &addr.sin_addr);
 	connect(conn_fd,(struct sockaddr*)&addr,sizeof(addr));	
 	
+	LoginMsg login;
+	printf("用户:");
+	fgets(login.username, sizeof(login.username), stdin);
+	login.username[strcspn(login.username, "\n")] = '\0';
+	printf("密码: ");
+	fgets(login.password, sizeof(login.password), stdin);
+	login.password[strcspn(login.password, "\n")] = '\0';
+	send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_LOGIN);	
+
 	int *hb_ptr = malloc(sizeof(int));
 	*hb_ptr = conn_fd;
 	pthread_t hb_tid;
@@ -92,6 +108,13 @@ int main()
 
 	char buf[1024];
 	int len,type;
+	recv_msg(conn_fd, buf, &len, &type);
+	if(type == MSG_TYPE_LOGIN_OK) printf("登录成功\n"); 	
+	else {
+    	printf("登录失败\n");
+    	close(conn_fd);
+    	return 0;
+	}
 	while(1) {
 	fgets(buf, sizeof(buf), stdin);
 	buf[strcspn(buf, "\n")] = '\0';
@@ -102,10 +125,10 @@ int main()
 	pthread_mutex_unlock(&send_mutex);
 	if(recv_msg(conn_fd,buf,&len, &type)==-1)break;
 	if(type == MSG_TYPE_PONG) continue;
-	buf[len] = '\0';
-	printf("%s\n",buf);
-	}
-	close(conn_fd);
+    	buf[len] = '\0';
+        printf("%s\n",buf);
 
+}
+	close(conn_fd);
 	return 0;
 }

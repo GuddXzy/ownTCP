@@ -17,6 +17,8 @@ typedef struct {
 typedef struct {
 	int fd;
 	time_t last_ping;
+	int is_logged_in;
+	char uid[32];
 } Client;
 
 Client *clients = NULL;
@@ -26,7 +28,24 @@ int epfd;
 #define MSG_TYPE_DATA 1
 #define MSG_TYPE_PING 2
 #define MSG_TYPE_PONG 3
+#define MSG_TYPE_LOGIN 4
+#define MSG_TYPE_LOGIN_OK 5
+#define MSG_TYPE_LOGIN_FAIL 6
 
+typedef struct {
+	char username[32];
+	char password[32];
+} User;
+
+typedef struct {
+	char username[32];
+	char password[32];
+} LoginMsg;
+User user_table[] = {
+	{"admin", "123456"},
+	{"test", "abcdef"},
+};
+int user_count = 2;
 int recv_all (int fd, char *buf, int len){
 	int total = 0;
 	while  (total < len ) {
@@ -59,7 +78,7 @@ int recv_msg(int fd, char *buf,int *len, int *type) {
 	if(ret < 0) return -1;
 	int n = ntohl(header.len);
 	int t = ntohl(header.type);
-	if(n < 0 || (t !=1 && t !=2 && t != 3)) {
+	if(n < 0 || (t < 1 || t>6)) {
 	return -1;
 	}
 	if( n > 0) {
@@ -112,6 +131,14 @@ void check_heartbeat() {
 		}	
 }
 
+int check_login(char *username, char *password) {
+	for (int i = 0; i < user_count; i++) {
+		if(strcmp(user_table[i].username, username) ==0 && strcmp(user_table[i].password,password) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
 int main()
 {
 	int listen_fd  = socket(AF_INET,SOCK_STREAM,0);
@@ -166,10 +193,26 @@ int main()
 				}	
 			}
 			send_msg(fd,"",0,MSG_TYPE_PONG);
-			}	
+			}
+		if (type == MSG_TYPE_LOGIN) {
+			LoginMsg *login = (LoginMsg*)buf;
+			if(check_login (login->username, login->password)) {
+				for(int j = 0; j < client_count; j++) {
+					if(clients[j].fd == fd) {
+						clients[j].is_logged_in =1;
+						strcpy(clients[j].uid, login->username);
+						break;
+					}
+				}
+				send_msg (fd,"" , 0, MSG_TYPE_LOGIN_OK);
+		} else {
+			send_msg(fd, "", 0 ,MSG_TYPE_LOGIN_FAIL);	
+			client_remove(fd);
 		}
 	}
 	}
+	}
+}
 	close(listen_fd);	
 	return 0;
 }
