@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include "log.h"
-
+#include <readline/readline.h>
 typedef struct {
     uint32_t len;
     uint32_t type;
@@ -33,7 +33,7 @@ pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MSG_TYPE_LOGIN_OK 5
 #define MSG_TYPE_LOGIN_FAIL 6
 #define MSG_TYPE_CHAT     7
-
+#define MSG_TYPE_KICK     8
 int recv_all(int fd, char *buf, int len) {
     int total = 0;
     while (total < len) {
@@ -63,7 +63,7 @@ int recv_msg(int fd, char *buf, int *len, int *type) {
     if (ret < 0) return -1;
     int n = ntohl(header.len);
     int t = ntohl(header.type);
-    if (t < 1 || t > 7) return -1;
+    if (t < 1 || t > 8) return -1;
     if (n > 0) {
         int ret1 = recv_all(fd, buf, n);
         if (ret1 < 0) return -1;
@@ -94,6 +94,10 @@ void* recv_thread(void* arg) {
             chat->content[959] = '\0';
             printf("%s说: %s\n", chat->from_uid, chat->content);
         }
+	if (type == MSG_TYPE_KICK) {
+    		printf("您的账号在其他地方登录，已被踢下线\n");
+    		break;
+	}
     }
     return NULL;
 }
@@ -109,6 +113,18 @@ void* heartbeat(void* arg) {
         if (sent < 0) break;
     }
     return NULL;
+}
+void clean_input(char *str) {
+    int i = 0, j = 0;
+    while (str[i]) {
+        if (str[i] == 8 || str[i] == 127) {
+            if (j > 0) j--;
+        } else if (str[i] >= 32 && str[i] < 127) {
+            str[j++] = str[i];
+        }
+        i++;
+    }
+    str[j] = '\0';
 }
 
 int main() {
@@ -128,16 +144,17 @@ int main() {
         return -1;
     }
     log_info("已连接到服务器");
-
-    LoginMsg login;
-    printf("用户: ");
-    fgets(login.username, sizeof(login.username), stdin);
-    login.username[strcspn(login.username, "\n")] = '\0';
-    printf("密码: ");
-    fgets(login.password, sizeof(login.password), stdin);
-    login.password[strcspn(login.password, "\n")] = '\0';
-    send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_LOGIN);
-
+	LoginMsg login;
+	memset(&login, 0, sizeof(LoginMsg));
+	char *uname = readline("用户: ");
+	char *passwd = readline("密码: ");
+	strncpy(login.username, uname, 31);
+	strncpy(login.password, passwd, 31);
+	clean_input(login.username);
+	clean_input(login.password);
+	free(uname);
+	free(passwd);
+	send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_LOGIN);
     char buf[1024];
     int len, type;
     recv_msg(conn_fd, buf, &len, &type);
