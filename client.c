@@ -27,6 +27,7 @@ typedef struct {
 
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+int LOG_LEVEL = 0;
 #define MSG_TYPE_DATA           1
 #define MSG_TYPE_PING           2
 #define MSG_TYPE_PONG           3

@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 #include "log.h"
 #include <openssl/md5.h>
+#include "config.h"
 typedef struct {
     uint32_t len;
     uint32_t type;
@@ -42,6 +43,7 @@ Client *clients = NULL;
 int client_count = 0;
 int client_cap = 0;
 int epfd;
+int LOG_LEVEL = 0;
 
 #define MSG_TYPE_DATA     	1
 #define MSG_TYPE_PING     	2
@@ -131,7 +133,7 @@ void client_remove(int fd) {
 void check_heartbeat() {
     time_t now = time(NULL);
     for (int i = 0; i < client_count; i++) {
-        if (now - clients[i].last_ping > 9) {
+        if (now - clients[i].last_ping > g_config.heartbeat_timeout) {
             log_warn("心跳超时, fd=%d uid=%s", clients[i].fd, clients[i].uid);
             client_remove(clients[i].fd);
             i--;
@@ -207,12 +209,15 @@ int main() {
         return -1;
     }
 
+    load_config("config.txt");
+    LOG_LEVEL = g_config.log_level;
+
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     struct sockaddr_in addr;
     addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(8888);
+    addr.sin_port = htons(g_config.port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {

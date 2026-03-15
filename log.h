@@ -9,7 +9,7 @@
 #define LOG_WARN  2
 #define LOG_ERROR 3
 
-#define LOG_LEVEL LOG_DEBUG
+extern int LOG_LEVEL;
 
 static const char* level_str[] = {"DEBUG", "INFO ", "WARN ", "ERROR"};
 
