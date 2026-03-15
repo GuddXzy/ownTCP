@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include "log.h"
-
+#include <openssl/md5.h>
 typedef struct {
     uint32_t len;
     uint32_t type;
@@ -35,7 +35,7 @@ typedef struct {
 
 typedef struct {
     char username[32];
-    char password[32];
+    char password[33];
 } User;
 
 Client *clients = NULL;
@@ -163,24 +163,37 @@ int check_register(char *username) {
     return 1;
 }
 
+void md5_hash(const char *input, char *output) {
+    unsigned char digest[16];
+    MD5((unsigned char*)input, strlen(input), digest);
+    for (int i = 0; i < 16; i++) {
+        sprintf(output + i * 2, "%02x", digest[i]);
+    }
+    output[32] = '\0';
+}
+
 void save_user(char *username, char *password) {
+    char hashed[33];
+    md5_hash(password, hashed);
     FILE *f = fopen("users.txt", "a");
     if (f == NULL) {
         log_error("无法写入users.txt");
         return;
     }
-    fprintf(f, "%s:%s\n", username, password);
+    fprintf(f, "%s:%s\n", username, hashed);
     fclose(f);
     strcpy(user_table[user_count].username, username);
-    strcpy(user_table[user_count].password, password);
+    strcpy(user_table[user_count].password, hashed);
     user_count++;
     log_info("新用户注册: %s", username);
 }
 
 int check_login(char *username, char *password) {
+    char hashed[33];
+    md5_hash(password, hashed);
     for (int i = 0; i < user_count; i++) {
         if (strcmp(user_table[i].username, username) == 0 &&
-            strcmp(user_table[i].password, password) == 0) {
+            strcmp(user_table[i].password, hashed) == 0) {
             return 1;
         }
     }
