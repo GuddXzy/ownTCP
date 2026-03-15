@@ -26,14 +26,17 @@ typedef struct {
 
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define MSG_TYPE_DATA     1
-#define MSG_TYPE_PING     2
-#define MSG_TYPE_PONG     3
-#define MSG_TYPE_LOGIN    4
-#define MSG_TYPE_LOGIN_OK 5
-#define MSG_TYPE_LOGIN_FAIL 6
-#define MSG_TYPE_CHAT     7
-#define MSG_TYPE_KICK     8
+#define MSG_TYPE_DATA     	1
+#define MSG_TYPE_PING     	2
+#define MSG_TYPE_PONG     	3
+#define MSG_TYPE_LOGIN    	4
+#define MSG_TYPE_LOGIN_OK 	5
+#define MSG_TYPE_LOGIN_FAIL 	6
+#define MSG_TYPE_CHAT     	7
+#define MSG_TYPE_KICK     	8
+#define MSG_TYPE_REGISTER       9
+#define MSG_TYPE_REGISTER_OK    10
+#define MSG_TYPE_REGISTER_FAIL  11
 int recv_all(int fd, char *buf, int len) {
     int total = 0;
     while (total < len) {
@@ -63,7 +66,7 @@ int recv_msg(int fd, char *buf, int *len, int *type) {
     if (ret < 0) return -1;
     int n = ntohl(header.len);
     int t = ntohl(header.type);
-    if (t < 1 || t > 8) return -1;
+    if (t < 1 || t > 11) return -1;
     if (n > 0) {
         int ret1 = recv_all(fd, buf, n);
         if (ret1 < 0) return -1;
@@ -144,6 +147,10 @@ int main() {
         return -1;
     }
     log_info("已连接到服务器");
+	printf("1. 登录\n2. 注册\n请选择: ");
+	char choice[4];
+	fgets(choice, sizeof(choice), stdin);
+	
 	LoginMsg login;
 	memset(&login, 0, sizeof(LoginMsg));
 	char *uname = readline("用户: ");
@@ -154,11 +161,25 @@ int main() {
 	clean_input(login.password);
 	free(uname);
 	free(passwd);
+	
+	if (choice[0] == '2') {
+    	send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_REGISTER);
+    	char buf[1024];
+    	int len, type;
+    	recv_msg(conn_fd, buf, &len, &type);
+    	if (type == MSG_TYPE_REGISTER_OK) {
+        	printf("注册成功，请重新启动客户端登录\n");
+    	} else {
+        	printf("注册失败，用户名已存在\n");
+    	}
+    	close(conn_fd);
+    	return 0;
+	}
 	send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_LOGIN);
-    char buf[1024];
-    int len, type;
-    recv_msg(conn_fd, buf, &len, &type);
-    if (type == MSG_TYPE_LOGIN_OK) {
+    	char buf[1024];
+    	int len, type;
+    	recv_msg(conn_fd, buf, &len, &type);
+    	if (type == MSG_TYPE_LOGIN_OK) {
         log_info("登录成功");
 
         int *rv_ptr = malloc(sizeof(int));

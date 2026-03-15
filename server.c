@@ -43,19 +43,20 @@ int client_count = 0;
 int client_cap = 0;
 int epfd;
 
-#define MSG_TYPE_DATA     1
-#define MSG_TYPE_PING     2
-#define MSG_TYPE_PONG     3
-#define MSG_TYPE_LOGIN    4
-#define MSG_TYPE_LOGIN_OK 5
-#define MSG_TYPE_LOGIN_FAIL 6
-#define MSG_TYPE_CHAT     7
+#define MSG_TYPE_DATA     	1
+#define MSG_TYPE_PING     	2
+#define MSG_TYPE_PONG     	3
+#define MSG_TYPE_LOGIN    	4
+#define MSG_TYPE_LOGIN_OK 	5
+#define MSG_TYPE_LOGIN_FAIL     6
+#define MSG_TYPE_CHAT           7
+#define MSG_TYPE_KICK 	        8
+#define MSG_TYPE_REGISTER       9
+#define MSG_TYPE_REGISTER_OK    10
+#define MSG_TYPE_REGISTER_FAIL  11
 
-User user_table[] = {
-    {"admin", "123456"},
-    {"test",  "abcdef"},
-};
-int user_count = 2;
+User user_table[256];
+int user_count = 0;
 
 int recv_all(int fd, char *buf, int len) {
     int total = 0;
@@ -86,7 +87,7 @@ int recv_msg(int fd, char *buf, int *len, int *type) {
     if (ret < 0) return -1;
     int n = ntohl(header.len);
     int t = ntohl(header.type);
-    if (n < 0 || t < 1 || t > 7) return -1;
+    if (n < 0 || t < 1 || t > 11) return -1;
     if (n > 0) {
         int rec = recv_all(fd, buf, n);
         if (rec < 0) return -1;
@@ -138,6 +139,44 @@ void check_heartbeat() {
     }
 }
 
+void load_users() {
+    FILE *f = fopen("users.txt", "r");
+    if (f == NULL) {
+        log_warn("users.txt不存在，从空用户表启动");
+        return;
+    }
+    while (fscanf(f, "%31[^:]:%31s\n", user_table[user_count].username,
+                  user_table[user_count].password) == 2) {
+        user_count++;
+        if (user_count >= 256) break;
+    }
+    fclose(f);
+    log_info("加载用户数: %d", user_count);
+}
+
+int check_register(char *username) {
+    for (int i = 0; i < user_count; i++) {
+        if (strcmp(user_table[i].username, username) == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+void save_user(char *username, char *password) {
+    FILE *f = fopen("users.txt", "a");
+    if (f == NULL) {
+        log_error("无法写入users.txt");
+        return;
+    }
+    fprintf(f, "%s:%s\n", username, password);
+    fclose(f);
+    strcpy(user_table[user_count].username, username);
+    strcpy(user_table[user_count].password, password);
+    user_count++;
+    log_info("新用户注册: %s", username);
+}
+
 int check_login(char *username, char *password) {
     for (int i = 0; i < user_count; i++) {
         if (strcmp(user_table[i].username, username) == 0 &&
@@ -180,6 +219,7 @@ int main() {
 
     add_to_epoll(listen_fd);
     add_to_epoll(STDIN_FILENO);
+    load_users();
     log_info("服务器启动成功，监听8888端口");
 
     char buf[1024];
@@ -246,6 +286,14 @@ int main() {
                     LoginMsg *login = (LoginMsg*)buf;
                     if (check_login(login->username, login->password)) {
                         for (int j = 0; j < client_count; j++) {
+    			    if (strcmp(clients[j].uid, login->username) == 0) {
+        			log_warn("顶替旧连接: %s fd=%d", login->username, clients[j].fd);
+        			send_msg(clients[j].fd, "", 0, MSG_TYPE_KICK);
+        			client_remove(clients[j].fd);
+        			break;
+    				}
+			}
+			for (int j = 0; j < client_count; j++) {
                             if (clients[j].fd == fd) {
                                 clients[j].is_logged_in = 1;
                                 strcpy(clients[j].uid, login->username);
@@ -277,6 +325,17 @@ int main() {
                         }
                     }
                 }
+		        if (type == MSG_TYPE_REGISTER) {
+                                LoginMsg *reg = (LoginMsg*)buf;
+                                if (check_register(reg->username)) {
+                                save_user(reg->username, reg->password);
+                                send_msg(fd, "", 0, MSG_TYPE_REGISTER_OK);
+                                } else {
+                        log_warn("注册失败，用户名已存在: %s", reg->username);
+                        send_msg(fd, "", 0, MSG_TYPE_REGISTER_FAIL);
+                        }
+                        client_remove(fd);
+                        }
             }
         }
     }
