@@ -8,12 +8,7 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/epoll.h>
-
-typedef struct {
-    char to_uid[32];
-    char from_uid[32];
-    char content[960];
-} ChatMsg;
+#include "log.h"
 
 typedef struct {
     uint32_t len;
@@ -27,18 +22,11 @@ typedef struct {
     char uid[32];
 } Client;
 
-Client *clients = NULL;
-int client_count = 0;
-int client_cap = 0;
-int epfd;
-
-#define MSG_TYPE_DATA 1
-#define MSG_TYPE_PING 2
-#define MSG_TYPE_PONG 3
-#define MSG_TYPE_LOGIN 4
-#define MSG_TYPE_LOGIN_OK 5
-#define MSG_TYPE_LOGIN_FAIL 6
-#define MSG_TYPE_CHAT 7
+typedef struct {
+    char to_uid[32];
+    char from_uid[32];
+    char content[960];
+} ChatMsg;
 
 typedef struct {
     char username[32];
@@ -49,6 +37,19 @@ typedef struct {
     char username[32];
     char password[32];
 } User;
+
+Client *clients = NULL;
+int client_count = 0;
+int client_cap = 0;
+int epfd;
+
+#define MSG_TYPE_DATA     1
+#define MSG_TYPE_PING     2
+#define MSG_TYPE_PONG     3
+#define MSG_TYPE_LOGIN    4
+#define MSG_TYPE_LOGIN_OK 5
+#define MSG_TYPE_LOGIN_FAIL 6
+#define MSG_TYPE_CHAT     7
 
 User user_table[] = {
     {"admin", "123456"},
@@ -68,7 +69,7 @@ int recv_all(int fd, char *buf, int len) {
 
 int send_msg(int fd, char *buf, int len, int type) {
     MsgHeader header;
-    header.len = htonl(len);
+    header.len  = htonl(len);
     header.type = htonl(type);
     int ret = send(fd, &header, sizeof(MsgHeader), 0);
     if (ret <= 0) return -1;
@@ -97,7 +98,7 @@ int recv_msg(int fd, char *buf, int *len, int *type) {
 
 void add_to_epoll(int fd) {
     struct epoll_event ev;
-    ev.events = EPOLLIN;
+    ev.events  = EPOLLIN;
     ev.data.fd = fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 }
@@ -107,10 +108,10 @@ void client_add(int fd) {
         client_cap = (client_cap == 0) ? 16 : client_cap * 2;
         clients = realloc(clients, client_cap * sizeof(Client));
     }
-    clients[client_count].fd = fd;
-    clients[client_count].last_ping = time(NULL);
+    clients[client_count].fd           = fd;
+    clients[client_count].last_ping    = time(NULL);
     clients[client_count].is_logged_in = 0;
-    clients[client_count].uid[0] = '\0';
+    clients[client_count].uid[0]       = '\0';
     client_count++;
 }
 
@@ -130,7 +131,7 @@ void check_heartbeat() {
     time_t now = time(NULL);
     for (int i = 0; i < client_count; i++) {
         if (now - clients[i].last_ping > 9) {
-            printf("心跳超时, fd=%d uid=%s\n", clients[i].fd, clients[i].uid);
+            log_warn("心跳超时, fd=%d uid=%s", clients[i].fd, clients[i].uid);
             client_remove(clients[i].fd);
             i--;
         }
@@ -149,19 +150,37 @@ int check_login(char *username, char *password) {
 
 int main() {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    printf("监听fd是%d\n", listen_fd);
+    if (listen_fd < 0) {
+        log_error("socket创建失败: %s", strerror(errno));
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     struct sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(8888);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(8888);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr));
-    listen(listen_fd, 10);
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        log_error("bind失败: %s", strerror(errno));
+        return -1;
+    }
+    if (listen(listen_fd, 10) < 0) {
+        log_error("listen失败: %s", strerror(errno));
+        return -1;
+    }
 
     epfd = epoll_create1(0);
+    if (epfd < 0) {
+        log_error("epoll_create1失败: %s", strerror(errno));
+        return -1;
+    }
+
     add_to_epoll(listen_fd);
     add_to_epoll(STDIN_FILENO);
+    log_info("服务器启动成功，监听8888端口");
 
     char buf[1024];
     int len, type;
@@ -178,7 +197,11 @@ int main() {
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == listen_fd) {
                 int conn_fd = accept(listen_fd, NULL, NULL);
-                printf("有客户端连接, conn_fd=%d\n", conn_fd);
+                if (conn_fd < 0) {
+                    log_error("accept失败: %s", strerror(errno));
+                    continue;
+                }
+                log_info("有客户端连接, fd=%d", conn_fd);
                 add_to_epoll(conn_fd);
                 client_add(conn_fd);
             } else if (events[i].data.fd == STDIN_FILENO) {
@@ -193,7 +216,7 @@ int main() {
                 for (int j = 0; j < client_count; j++) {
                     if (strcmp(clients[j].uid, uid) == 0) {
                         send_msg(clients[j].fd, msg, strlen(msg), MSG_TYPE_DATA);
-                        printf("已发送给 %s\n", uid);
+                        log_info("已发送给 %s", uid);
                         break;
                     }
                 }
@@ -201,12 +224,13 @@ int main() {
                 int fd = events[i].data.fd;
                 int ret = recv_msg(fd, buf, &len, &type);
                 if (ret == -1) {
+                    log_warn("客户端断开, fd=%d", fd);
                     client_remove(fd);
                     continue;
                 }
                 if (type == MSG_TYPE_DATA) {
                     buf[len] = '\0';
-                    printf("来自fd=%d: %s\n", fd, buf);
+                    log_info("来自fd=%d: %s", fd, buf);
                     send_msg(fd, reply, strlen(reply), MSG_TYPE_DATA);
                 }
                 if (type == MSG_TYPE_PING) {
@@ -228,15 +252,15 @@ int main() {
                                 break;
                             }
                         }
-                        printf("登录成功: %s, fd=%d\n", login->username, fd);
+                        log_info("登录成功: %s fd=%d", login->username, fd);
                         send_msg(fd, "", 0, MSG_TYPE_LOGIN_OK);
-                    }else {
-                        printf("登录失败, fd=%d\n", fd);
+                    } else {
+                        log_warn("登录失败, fd=%d", fd);
                         send_msg(fd, "", 0, MSG_TYPE_LOGIN_FAIL);
                         client_remove(fd);
                     }
                 }
-	        if (type == MSG_TYPE_CHAT) {
+                if (type == MSG_TYPE_CHAT) {
                     ChatMsg *chat = (ChatMsg*)buf;
                     chat->content[959] = '\0';
                     for (int j = 0; j < client_count; j++) {
@@ -248,7 +272,7 @@ int main() {
                     for (int j = 0; j < client_count; j++) {
                         if (strcmp(clients[j].uid, chat->to_uid) == 0) {
                             send_msg(clients[j].fd, (char*)chat, sizeof(ChatMsg), MSG_TYPE_CHAT);
-                            printf("转发: %s -> %s: %s\n", chat->from_uid, chat->to_uid, chat->content);
+                            log_info("转发: %s -> %s: %s", chat->from_uid, chat->to_uid, chat->content);
                             break;
                         }
                     }

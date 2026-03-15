@@ -5,6 +5,18 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <errno.h>
+#include "log.h"
+
+typedef struct {
+    uint32_t len;
+    uint32_t type;
+} MsgHeader;
+
+typedef struct {
+    char username[32];
+    char password[32];
+} LoginMsg;
 
 typedef struct {
     char to_uid[32];
@@ -12,25 +24,15 @@ typedef struct {
     char content[960];
 } ChatMsg;
 
-typedef struct {
-    uint32_t len;
-    uint32_t type;
-} MsgHeader;
-
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-typedef struct {
-    char username[32];
-    char password[32];
-} LoginMsg;
-
-#define MSG_TYPE_DATA 1
-#define MSG_TYPE_PING 2
-#define MSG_TYPE_PONG 3
-#define MSG_TYPE_LOGIN 4
+#define MSG_TYPE_DATA     1
+#define MSG_TYPE_PING     2
+#define MSG_TYPE_PONG     3
+#define MSG_TYPE_LOGIN    4
 #define MSG_TYPE_LOGIN_OK 5
 #define MSG_TYPE_LOGIN_FAIL 6
-#define MSG_TYPE_CHAT 7
+#define MSG_TYPE_CHAT     7
 
 int recv_all(int fd, char *buf, int len) {
     int total = 0;
@@ -44,7 +46,7 @@ int recv_all(int fd, char *buf, int len) {
 
 int send_msg(int fd, char *buf, int len, int type) {
     MsgHeader header;
-    header.len = htonl(len);
+    header.len  = htonl(len);
     header.type = htonl(type);
     int ret = send(fd, &header, sizeof(MsgHeader), 0);
     if (ret <= 0) return -1;
@@ -79,7 +81,7 @@ void* recv_thread(void* arg) {
     while (1) {
         int ret = recv_msg(conn_fd, buf, &len, &type);
         if (ret == -1) {
-            printf("与服务器断开连接\n");
+            log_warn("与服务器断开连接");
             break;
         }
         if (type == MSG_TYPE_PONG) continue;
@@ -87,12 +89,12 @@ void* recv_thread(void* arg) {
             buf[len] = '\0';
             printf("服务端发来: %s\n", buf);
         }
-	if (type == MSG_TYPE_CHAT) {
-    		ChatMsg *chat = (ChatMsg*)buf;
-    		chat->content[959] = '\0';
-   	 	printf("%s说: %s\n", chat->from_uid, chat->content);
-	}
-    	}
+        if (type == MSG_TYPE_CHAT) {
+            ChatMsg *chat = (ChatMsg*)buf;
+            chat->content[959] = '\0';
+            printf("%s说: %s\n", chat->from_uid, chat->content);
+        }
+    }
     return NULL;
 }
 
@@ -111,12 +113,21 @@ void* heartbeat(void* arg) {
 
 int main() {
     int conn_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (conn_fd < 0) {
+        log_error("socket创建失败: %s", strerror(errno));
+        return -1;
+    }
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(8888);
+    addr.sin_port   = htons(8888);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    connect(conn_fd, (struct sockaddr*)&addr, sizeof(addr));
+
+    if (connect(conn_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        log_error("连接服务器失败: %s", strerror(errno));
+        return -1;
+    }
+    log_info("已连接到服务器");
 
     LoginMsg login;
     printf("用户: ");
@@ -131,7 +142,7 @@ int main() {
     int len, type;
     recv_msg(conn_fd, buf, &len, &type);
     if (type == MSG_TYPE_LOGIN_OK) {
-        printf("登录成功\n");
+        log_info("登录成功");
 
         int *rv_ptr = malloc(sizeof(int));
         *rv_ptr = conn_fd;
@@ -145,30 +156,35 @@ int main() {
         pthread_create(&hb_tid, NULL, heartbeat, hb_ptr);
         pthread_detach(hb_tid);
     } else {
-        printf("登录失败\n");
+        log_warn("登录失败");
         close(conn_fd);
         return 0;
     }
-        while (1) {
-    		fgets(buf, sizeof(buf), stdin);
-   		buf[strcspn(buf, "\n")] = '\0';
-    		if (strcmp(buf, "quit") == 0) break;
-    		char *colon = strchr(buf, ':');
-    		if (colon == NULL) {
-        	printf("格式错误，请输入 uid:消息\n");
-        	continue;
-    		}
-    		*colon = '\0';
-    		char *to_uid = buf;
-    		char *content = colon + 1;
-    		ChatMsg chat;
-    		memset(&chat, 0, sizeof(ChatMsg));
-    		strncpy(chat.to_uid, to_uid, 31);
-    		strncpy(chat.content, content, 959);
-    		pthread_mutex_lock(&send_mutex);
-    		send_msg(conn_fd, (char*)&chat, sizeof(ChatMsg), MSG_TYPE_CHAT);
-    		pthread_mutex_unlock(&send_mutex);
-		}
-    		close(conn_fd);
-   		return 0;
+
+    while (1) {
+        fgets(buf, sizeof(buf), stdin);
+        buf[strcspn(buf, "\n")] = '\0';
+        if (strcmp(buf, "quit") == 0) break;
+
+        char *colon = strchr(buf, ':');
+        if (colon == NULL) {
+            printf("格式错误，请输入 目标用户:消息内容\n");
+            continue;
+        }
+        *colon = '\0';
+        char *to_uid  = buf;
+        char *content = colon + 1;
+
+        ChatMsg chat;
+        memset(&chat, 0, sizeof(ChatMsg));
+        strncpy(chat.to_uid, to_uid, 31);
+        strncpy(chat.content, content, 959);
+
+        pthread_mutex_lock(&send_mutex);
+        send_msg(conn_fd, (char*)&chat, sizeof(ChatMsg), MSG_TYPE_CHAT);
+        pthread_mutex_unlock(&send_mutex);
+    }
+
+    close(conn_fd);
+    return 0;
 }
