@@ -8,6 +8,7 @@
 #include <errno.h>
 #include "log.h"
 #include <readline/readline.h>
+
 typedef struct {
     uint32_t len;
     uint32_t type;
@@ -26,17 +27,18 @@ typedef struct {
 
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define MSG_TYPE_DATA     	1
-#define MSG_TYPE_PING     	2
-#define MSG_TYPE_PONG     	3
-#define MSG_TYPE_LOGIN    	4
-#define MSG_TYPE_LOGIN_OK 	5
-#define MSG_TYPE_LOGIN_FAIL 	6
-#define MSG_TYPE_CHAT     	7
-#define MSG_TYPE_KICK     	8
+#define MSG_TYPE_DATA           1
+#define MSG_TYPE_PING           2
+#define MSG_TYPE_PONG           3
+#define MSG_TYPE_LOGIN          4
+#define MSG_TYPE_LOGIN_OK       5
+#define MSG_TYPE_LOGIN_FAIL     6
+#define MSG_TYPE_CHAT           7
+#define MSG_TYPE_KICK           8
 #define MSG_TYPE_REGISTER       9
 #define MSG_TYPE_REGISTER_OK    10
 #define MSG_TYPE_REGISTER_FAIL  11
+
 int recv_all(int fd, char *buf, int len) {
     int total = 0;
     while (total < len) {
@@ -97,10 +99,10 @@ void* recv_thread(void* arg) {
             chat->content[959] = '\0';
             printf("%s说: %s\n", chat->from_uid, chat->content);
         }
-	if (type == MSG_TYPE_KICK) {
-    		printf("您的账号在其他地方登录，已被踢下线\n");
-    		break;
-	}
+        if (type == MSG_TYPE_KICK) {
+            printf("您的账号在其他地方登录，已被踢下线\n");
+            break;
+        }
     }
     return NULL;
 }
@@ -117,6 +119,7 @@ void* heartbeat(void* arg) {
     }
     return NULL;
 }
+
 void clean_input(char *str) {
     int i = 0, j = 0;
     while (str[i]) {
@@ -128,6 +131,25 @@ void clean_input(char *str) {
         i++;
     }
     str[j] = '\0';
+}
+
+int valid_username(char *str) {
+    int len = strlen(str);
+    if (len < 1 || len > 31) return 0;
+    for (int i = 0; i < len; i++) {
+        char c = str[i];
+        if (!((c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') ||
+              c == '_')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int valid_password(char *str) {
+    return strlen(str) >= 6;
 }
 
 int main() {
@@ -147,39 +169,59 @@ int main() {
         return -1;
     }
     log_info("已连接到服务器");
-	printf("1. 登录\n2. 注册\n请选择: ");
-	char choice[4];
-	fgets(choice, sizeof(choice), stdin);
-	
-	LoginMsg login;
-	memset(&login, 0, sizeof(LoginMsg));
-	char *uname = readline("用户: ");
-	char *passwd = readline("密码: ");
-	strncpy(login.username, uname, 31);
-	strncpy(login.password, passwd, 31);
-	clean_input(login.username);
-	clean_input(login.password);
-	free(uname);
-	free(passwd);
-	
-	if (choice[0] == '2') {
-    	send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_REGISTER);
-    	char buf[1024];
-    	int len, type;
-    	recv_msg(conn_fd, buf, &len, &type);
-    	if (type == MSG_TYPE_REGISTER_OK) {
-        	printf("注册成功，请重新启动客户端登录\n");
-    	} else {
-        	printf("注册失败，用户名已存在\n");
-    	}
-    	close(conn_fd);
-    	return 0;
-	}
-	send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_LOGIN);
-    	char buf[1024];
-    	int len, type;
-    	recv_msg(conn_fd, buf, &len, &type);
-    	if (type == MSG_TYPE_LOGIN_OK) {
+
+    int choice = 0;
+    while (1) {
+        printf("1. 登录\n2. 注册\n请选择: ");
+        char choice_buf[4];
+        fgets(choice_buf, sizeof(choice_buf), stdin);
+        choice = choice_buf[0] - '0';
+        if (choice == 1 || choice == 2) break;
+        printf("输入有误，请输入1或2\n");
+    }
+
+    LoginMsg login;
+    while (1) {
+        memset(&login, 0, sizeof(LoginMsg));
+        char *uname = readline("用户: ");
+        char *passwd = readline("密码: ");
+        strncpy(login.username, uname, 31);
+        strncpy(login.password, passwd, 31);
+        clean_input(login.username);
+        clean_input(login.password);
+        free(uname);
+        free(passwd);
+        if (!valid_username(login.username)) {
+            printf("用户名只允许字母数字下划线\n");
+            continue;
+        }
+        if (!valid_password(login.password)) {
+            printf("密码至少6位\n");
+            continue;
+        }
+        break;
+    }
+
+    if (choice == 2) {
+        send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_REGISTER);
+        char buf[1024];
+        int len, type;
+        recv_msg(conn_fd, buf, &len, &type);
+        if (type == MSG_TYPE_REGISTER_OK) {
+            printf("注册成功，请重新启动客户端登录\n");
+        } else {
+            printf("注册失败，用户名已存在\n");
+        }
+        close(conn_fd);
+        return 0;
+    }
+
+    send_msg(conn_fd, (char*)&login, sizeof(LoginMsg), MSG_TYPE_LOGIN);
+
+    char buf[1024];
+    int len, type;
+    recv_msg(conn_fd, buf, &len, &type);
+    if (type == MSG_TYPE_LOGIN_OK) {
         log_info("登录成功");
 
         int *rv_ptr = malloc(sizeof(int));
