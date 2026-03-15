@@ -10,6 +10,12 @@
 #include <sys/epoll.h>
 
 typedef struct {
+    char to_uid[32];
+    char from_uid[32];
+    char content[960];
+} ChatMsg;
+
+typedef struct {
     uint32_t len;
     uint32_t type;
 } MsgHeader;
@@ -32,6 +38,7 @@ int epfd;
 #define MSG_TYPE_LOGIN 4
 #define MSG_TYPE_LOGIN_OK 5
 #define MSG_TYPE_LOGIN_FAIL 6
+#define MSG_TYPE_CHAT 7
 
 typedef struct {
     char username[32];
@@ -78,7 +85,7 @@ int recv_msg(int fd, char *buf, int *len, int *type) {
     if (ret < 0) return -1;
     int n = ntohl(header.len);
     int t = ntohl(header.type);
-    if (n < 0 || t < 1 || t > 6) return -1;
+    if (n < 0 || t < 1 || t > 7) return -1;
     if (n > 0) {
         int rec = recv_all(fd, buf, n);
         if (rec < 0) return -1;
@@ -223,10 +230,27 @@ int main() {
                         }
                         printf("登录成功: %s, fd=%d\n", login->username, fd);
                         send_msg(fd, "", 0, MSG_TYPE_LOGIN_OK);
-                    } else {
+                    }else {
                         printf("登录失败, fd=%d\n", fd);
                         send_msg(fd, "", 0, MSG_TYPE_LOGIN_FAIL);
                         client_remove(fd);
+                    }
+                }
+	        if (type == MSG_TYPE_CHAT) {
+                    ChatMsg *chat = (ChatMsg*)buf;
+                    chat->content[959] = '\0';
+                    for (int j = 0; j < client_count; j++) {
+                        if (clients[j].fd == fd) {
+                            strcpy(chat->from_uid, clients[j].uid);
+                            break;
+                        }
+                    }
+                    for (int j = 0; j < client_count; j++) {
+                        if (strcmp(clients[j].uid, chat->to_uid) == 0) {
+                            send_msg(clients[j].fd, (char*)chat, sizeof(ChatMsg), MSG_TYPE_CHAT);
+                            printf("转发: %s -> %s: %s\n", chat->from_uid, chat->to_uid, chat->content);
+                            break;
+                        }
                     }
                 }
             }
