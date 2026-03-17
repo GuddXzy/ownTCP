@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/epoll.h>
 #include <openssl/md5.h>
 #include "log.h"
@@ -14,10 +15,10 @@
 #include "protocol.h"   /* 协议头、CRC、消息类型 全部从这里引入 */
 
 /*
- * ---- 服务端数据结构 ----
- * Client: 每个TCP连接对应一个Client
- * User:   用户表（从users.txt加载）
- */
+ *  * ---- 服务端数据结构 ----
+ *   * Client: 每个TCP连接对应一个Client
+ *    * User:   用户表（从users.txt加载）
+ *     */
 typedef struct {
     int fd;
     time_t last_ping;
@@ -52,19 +53,19 @@ int recv_all(int fd, char *buf, int len) {
 }
 
 /*
- * send_msg: 构造完整协议帧并发送
- *
- * 流程:
- * 1. 对 payload 计算 CRC-16
- * 2. 填充 header (magic + crc + len + type)
- * 3. 先发 header，再发 payload
- *
- * 面试要点:
- * Q: 为什么CRC只校验payload不校验header？
- * A: header中的magic已经能检测帧错位，len和type是固定格式
- *    且如果len/type损坏，解析本身就会失败。校验payload
- *    足以覆盖绝大多数数据完整性问题，且减少计算量。
- */
+ *  * send_msg: 构造完整协议帧并发送
+ *   *
+ *    * 流程:
+ *     * 1. 对 payload 计算 CRC-16
+ *      * 2. 填充 header (magic + crc + len + type)
+ *       * 3. 先发 header，再发 payload
+ *        *
+ *         * 面试要点:
+ *          * Q: 为什么CRC只校验payload不校验header？
+ *           * A: header中的magic已经能检测帧错位，len和type是固定格式
+ *            *    且如果len/type损坏，解析本身就会失败。校验payload
+ *             *    足以覆盖绝大多数数据完整性问题，且减少计算量。
+ *              */
 int send_msg(int fd, char *buf, int len, int type) {
     MsgHeader header;
     header.magic = htons(PROTO_MAGIC);
@@ -82,20 +83,20 @@ int send_msg(int fd, char *buf, int len, int type) {
 }
 
 /*
- * recv_msg: 接收并验证一个完整协议帧
- *
- * 流程:
- * 1. 读取 12 字节 header
- * 2. 验证 magic == 0xABCD
- * 3. 读取 payload
- * 4. 验证 CRC 一致
- *
- * 面试要点:
- * Q: 如果magic校验失败怎么处理？
- * A: 直接断开连接。因为TCP是字节流，一旦帧失步，
- *    后续所有数据都不可信，最安全的做法是断开重连。
- *    （在UDP场景下可以选择跳过，继续找下一个magic）
- */
+ *  * recv_msg: 接收并验证一个完整协议帧
+ *   *
+ *    * 流程:
+ *     * 1. 读取 12 字节 header
+ *      * 2. 验证 magic == 0xABCD
+ *       * 3. 读取 payload
+ *        * 4. 验证 CRC 一致
+ *         *
+ *          * 面试要点:
+ *           * Q: 如果magic校验失败怎么处理？
+ *            * A: 直接断开连接。因为TCP是字节流，一旦帧失步，
+ *             *    后续所有数据都不可信，最安全的做法是断开重连。
+ *              *    （在UDP场景下可以选择跳过，继续找下一个magic）
+ *               */
 int recv_msg(int fd, char *buf, int *len, int *type) {
     MsgHeader header;
     int ret = recv_all(fd, (char*)&header, sizeof(MsgHeader));
@@ -112,7 +113,7 @@ int recv_msg(int fd, char *buf, int *len, int *type) {
     int t = ntohl(header.type);
     uint16_t recv_crc = ntohs(header.crc16);
 
-    if (n < 0 || t < 1 || t > 11) return -1;
+    if (n < 0 || n > MAX_PAYLOAD || t < 1 || t > 11) return -1;
 
     if (n > 0) {
         int rec = recv_all(fd, buf, n);
@@ -241,6 +242,16 @@ int check_login(char *username, char *password) {
 /* ---- 主函数 ---- */
 
 int main() {
+    /*
+ *      * 忽略 SIGPIPE 信号
+ *           *
+ *                * 当客户端已断开，服务端继续往该 fd 写数据时，
+ *                     * 内核会发送 SIGPIPE，默认行为是杀掉进程。
+ *                          * 忽略后 send() 会返回 -1 并设置 errno=EPIPE，
+ *                               * 由上层逻辑正常处理断开即可。
+ *                                    */
+    signal(SIGPIPE, SIG_IGN);
+
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         log_error("socket创建失败: %s", strerror(errno));
@@ -345,6 +356,11 @@ int main() {
                     send_msg(fd, "", 0, MSG_TYPE_PONG);
                 }
                 if (type == MSG_TYPE_LOGIN) {
+                    if (len != sizeof(LoginMsg)) {
+                        log_warn("LOGIN包长度异常: %d, fd=%d", len, fd);
+                        client_remove(fd);
+                        continue;
+                    }
                     LoginMsg *login = (LoginMsg*)buf;
                     if (check_login(login->username, login->password)) {
                         for (int j = 0; j < client_count; j++) {
@@ -372,6 +388,10 @@ int main() {
                     }
                 }
                 if (type == MSG_TYPE_CHAT) {
+                    if (len != sizeof(ChatMsg)) {
+                        log_warn("CHAT包长度异常: %d, fd=%d", len, fd);
+                        continue;
+                    }
                     ChatMsg *chat = (ChatMsg*)buf;
                     chat->content[959] = '\0';
                     for (int j = 0; j < client_count; j++) {
@@ -392,6 +412,11 @@ int main() {
                     }
                 }
                 if (type == MSG_TYPE_REGISTER) {
+                    if (len != sizeof(LoginMsg)) {
+                        log_warn("REGISTER包长度异常: %d, fd=%d", len, fd);
+                        client_remove(fd);
+                        continue;
+                    }
                     LoginMsg *reg = (LoginMsg*)buf;
                     if (check_register(reg->username)) {
                         save_user(reg->username, reg->password);
