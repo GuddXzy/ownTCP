@@ -8,14 +8,16 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/epoll.h>
-#include "log.h"
 #include <openssl/md5.h>
+#include "log.h"
 #include "config.h"
-typedef struct {
-    uint32_t len;
-    uint32_t type;
-} MsgHeader;
+#include "protocol.h"   /* 协议头、CRC、消息类型 全部从这里引入 */
 
+/*
+ * ---- 服务端数据结构 ----
+ * Client: 每个TCP连接对应一个Client
+ * User:   用户表（从users.txt加载）
+ */
 typedef struct {
     int fd;
     time_t last_ping;
@@ -24,19 +26,8 @@ typedef struct {
 } Client;
 
 typedef struct {
-    char to_uid[32];
-    char from_uid[32];
-    char content[960];
-} ChatMsg;
-
-typedef struct {
     char username[32];
-    char password[32];
-} LoginMsg;
-
-typedef struct {
-    char username[32];
-    char password[33];
+    char password[33];  /* MD5 hex = 32字符 + '\0' */
 } User;
 
 Client *clients = NULL;
@@ -45,20 +36,10 @@ int client_cap = 0;
 int epfd;
 int LOG_LEVEL = 0;
 
-#define MSG_TYPE_DATA     	1
-#define MSG_TYPE_PING     	2
-#define MSG_TYPE_PONG     	3
-#define MSG_TYPE_LOGIN    	4
-#define MSG_TYPE_LOGIN_OK 	5
-#define MSG_TYPE_LOGIN_FAIL     6
-#define MSG_TYPE_CHAT           7
-#define MSG_TYPE_KICK 	        8
-#define MSG_TYPE_REGISTER       9
-#define MSG_TYPE_REGISTER_OK    10
-#define MSG_TYPE_REGISTER_FAIL  11
-
 User user_table[256];
 int user_count = 0;
+
+/* ---- 可靠收发 ---- */
 
 int recv_all(int fd, char *buf, int len) {
     int total = 0;
@@ -70,10 +51,27 @@ int recv_all(int fd, char *buf, int len) {
     return 0;
 }
 
+/*
+ * send_msg: 构造完整协议帧并发送
+ *
+ * 流程:
+ * 1. 对 payload 计算 CRC-16
+ * 2. 填充 header (magic + crc + len + type)
+ * 3. 先发 header，再发 payload
+ *
+ * 面试要点:
+ * Q: 为什么CRC只校验payload不校验header？
+ * A: header中的magic已经能检测帧错位，len和type是固定格式
+ *    且如果len/type损坏，解析本身就会失败。校验payload
+ *    足以覆盖绝大多数数据完整性问题，且减少计算量。
+ */
 int send_msg(int fd, char *buf, int len, int type) {
     MsgHeader header;
-    header.len  = htonl(len);
-    header.type = htonl(type);
+    header.magic = htons(PROTO_MAGIC);
+    header.crc16 = htons(crc16_modbus((uint8_t*)buf, len));
+    header.len   = htonl(len);
+    header.type  = htonl(type);
+
     int ret = send(fd, &header, sizeof(MsgHeader), 0);
     if (ret <= 0) return -1;
     if (len > 0) {
@@ -83,21 +81,58 @@ int send_msg(int fd, char *buf, int len, int type) {
     return 0;
 }
 
+/*
+ * recv_msg: 接收并验证一个完整协议帧
+ *
+ * 流程:
+ * 1. 读取 12 字节 header
+ * 2. 验证 magic == 0xABCD
+ * 3. 读取 payload
+ * 4. 验证 CRC 一致
+ *
+ * 面试要点:
+ * Q: 如果magic校验失败怎么处理？
+ * A: 直接断开连接。因为TCP是字节流，一旦帧失步，
+ *    后续所有数据都不可信，最安全的做法是断开重连。
+ *    （在UDP场景下可以选择跳过，继续找下一个magic）
+ */
 int recv_msg(int fd, char *buf, int *len, int *type) {
     MsgHeader header;
     int ret = recv_all(fd, (char*)&header, sizeof(MsgHeader));
     if (ret < 0) return -1;
+
+    /* 第一步: 验证魔数 */
+    if (ntohs(header.magic) != PROTO_MAGIC) {
+        log_warn("magic校验失败: 0x%04X (期望 0x%04X), fd=%d",
+                 ntohs(header.magic), PROTO_MAGIC, fd);
+        return -1;
+    }
+
     int n = ntohl(header.len);
     int t = ntohl(header.type);
+    uint16_t recv_crc = ntohs(header.crc16);
+
     if (n < 0 || t < 1 || t > 11) return -1;
+
     if (n > 0) {
         int rec = recv_all(fd, buf, n);
         if (rec < 0) return -1;
     }
+
+    /* 第二步: 验证CRC */
+    uint16_t calc_crc = crc16_modbus((uint8_t*)buf, n);
+    if (recv_crc != calc_crc) {
+        log_warn("CRC校验失败: recv=0x%04X calc=0x%04X, fd=%d",
+                 recv_crc, calc_crc, fd);
+        return -1;
+    }
+
     *len = n;
     *type = t;
     return 0;
 }
+
+/* ---- epoll 管理 ---- */
 
 void add_to_epoll(int fd) {
     struct epoll_event ev;
@@ -105,6 +140,8 @@ void add_to_epoll(int fd) {
     ev.data.fd = fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 }
+
+/* ---- 客户端管理 ---- */
 
 void client_add(int fd) {
     if (client_count == client_cap) {
@@ -141,13 +178,15 @@ void check_heartbeat() {
     }
 }
 
+/* ---- 用户管理 ---- */
+
 void load_users() {
     FILE *f = fopen("users.txt", "r");
     if (f == NULL) {
         log_warn("users.txt不存在，从空用户表启动");
         return;
     }
-    while (fscanf(f, "%31[^:]:%31s\n", user_table[user_count].username,
+    while (fscanf(f, "%32[^:]:%32s\n", user_table[user_count].username,
                   user_table[user_count].password) == 2) {
         user_count++;
         if (user_count >= 256) break;
@@ -158,9 +197,8 @@ void load_users() {
 
 int check_register(char *username) {
     for (int i = 0; i < user_count; i++) {
-        if (strcmp(user_table[i].username, username) == 0) {
+        if (strcmp(user_table[i].username, username) == 0)
             return 0;
-        }
     }
     return 1;
 }
@@ -168,9 +206,8 @@ int check_register(char *username) {
 void md5_hash(const char *input, char *output) {
     unsigned char digest[16];
     MD5((unsigned char*)input, strlen(input), digest);
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 16; i++)
         sprintf(output + i * 2, "%02x", digest[i]);
-    }
     output[32] = '\0';
 }
 
@@ -195,12 +232,13 @@ int check_login(char *username, char *password) {
     md5_hash(password, hashed);
     for (int i = 0; i < user_count; i++) {
         if (strcmp(user_table[i].username, username) == 0 &&
-            strcmp(user_table[i].password, hashed) == 0) {
+            strcmp(user_table[i].password, hashed) == 0)
             return 1;
-        }
     }
     return 0;
 }
+
+/* ---- 主函数 ---- */
 
 int main() {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -217,7 +255,7 @@ int main() {
 
     struct sockaddr_in addr;
     addr.sin_family      = AF_INET;
-    addr.sin_port = htons(g_config.port);
+    addr.sin_port        = htons(g_config.port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -238,7 +276,8 @@ int main() {
     add_to_epoll(listen_fd);
     add_to_epoll(STDIN_FILENO);
     load_users();
-    log_info("服务器启动成功，监听8888端口");
+    log_info("服务器启动成功，监听%d端口 (协议v2: magic=0x%04X)",
+             g_config.port, PROTO_MAGIC);
 
     char buf[1024];
     int len, type;
@@ -262,6 +301,7 @@ int main() {
                 log_info("有客户端连接, fd=%d", conn_fd);
                 add_to_epoll(conn_fd);
                 client_add(conn_fd);
+
             } else if (events[i].data.fd == STDIN_FILENO) {
                 char input[1024];
                 fgets(input, sizeof(input), stdin);
@@ -278,6 +318,7 @@ int main() {
                         break;
                     }
                 }
+
             } else {
                 int fd = events[i].data.fd;
                 int ret = recv_msg(fd, buf, &len, &type);
@@ -286,32 +327,36 @@ int main() {
                     client_remove(fd);
                     continue;
                 }
+
+                /* 收到任何消息都刷新心跳 */
+                for (int j = 0; j < client_count; j++) {
+                    if (clients[j].fd == fd) {
+                        clients[j].last_ping = time(NULL);
+                        break;
+                    }
+                }
+
                 if (type == MSG_TYPE_DATA) {
                     buf[len] = '\0';
                     log_info("来自fd=%d: %s", fd, buf);
                     send_msg(fd, reply, strlen(reply), MSG_TYPE_DATA);
                 }
                 if (type == MSG_TYPE_PING) {
-                    for (int j = 0; j < client_count; j++) {
-                        if (clients[j].fd == fd) {
-                            clients[j].last_ping = time(NULL);
-                            break;
-                        }
-                    }
                     send_msg(fd, "", 0, MSG_TYPE_PONG);
                 }
                 if (type == MSG_TYPE_LOGIN) {
                     LoginMsg *login = (LoginMsg*)buf;
                     if (check_login(login->username, login->password)) {
                         for (int j = 0; j < client_count; j++) {
-    			    if (strcmp(clients[j].uid, login->username) == 0) {
-        			log_warn("顶替旧连接: %s fd=%d", login->username, clients[j].fd);
-        			send_msg(clients[j].fd, "", 0, MSG_TYPE_KICK);
-        			client_remove(clients[j].fd);
-        			break;
-    				}
-			}
-			for (int j = 0; j < client_count; j++) {
+                            if (strcmp(clients[j].uid, login->username) == 0) {
+                                log_warn("顶替旧连接: %s fd=%d",
+                                         login->username, clients[j].fd);
+                                send_msg(clients[j].fd, "", 0, MSG_TYPE_KICK);
+                                client_remove(clients[j].fd);
+                                break;
+                            }
+                        }
+                        for (int j = 0; j < client_count; j++) {
                             if (clients[j].fd == fd) {
                                 clients[j].is_logged_in = 1;
                                 strcpy(clients[j].uid, login->username);
@@ -337,23 +382,26 @@ int main() {
                     }
                     for (int j = 0; j < client_count; j++) {
                         if (strcmp(clients[j].uid, chat->to_uid) == 0) {
-                            send_msg(clients[j].fd, (char*)chat, sizeof(ChatMsg), MSG_TYPE_CHAT);
-                            log_info("转发: %s -> %s: %s", chat->from_uid, chat->to_uid, chat->content);
+                            send_msg(clients[j].fd, (char*)chat,
+                                     sizeof(ChatMsg), MSG_TYPE_CHAT);
+                            log_info("转发: %s -> %s: %s",
+                                     chat->from_uid, chat->to_uid,
+                                     chat->content);
                             break;
                         }
                     }
                 }
-		        if (type == MSG_TYPE_REGISTER) {
-                                LoginMsg *reg = (LoginMsg*)buf;
-                                if (check_register(reg->username)) {
-                                save_user(reg->username, reg->password);
-                                send_msg(fd, "", 0, MSG_TYPE_REGISTER_OK);
-                                } else {
+                if (type == MSG_TYPE_REGISTER) {
+                    LoginMsg *reg = (LoginMsg*)buf;
+                    if (check_register(reg->username)) {
+                        save_user(reg->username, reg->password);
+                        send_msg(fd, "", 0, MSG_TYPE_REGISTER_OK);
+                    } else {
                         log_warn("注册失败，用户名已存在: %s", reg->username);
                         send_msg(fd, "", 0, MSG_TYPE_REGISTER_FAIL);
-                        }
-                        client_remove(fd);
-                        }
+                    }
+                    client_remove(fd);
+                }
             }
         }
     }
